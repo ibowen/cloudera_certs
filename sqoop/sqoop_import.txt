@@ -1,0 +1,128 @@
+sqoop list-databases --connect 'jdbc:mysql://quickstart.cloudera:3306' --username retail_dba --password cloudera
+sqoop list-tables --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera
+sqoop eval --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera --query 'select count(1) from order_items'
+
+hadoop fs -mkdir /user/cloudera/sqoop_import
+sqoop import-all-tables \
+-m 4 \
+--connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+--warehouse-dir /user/cloudera/sqoop_import
+
+hadoop fs -rm -R /user/cloudera/sqoop_import/*
+sqoop import-all-tables --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--warehouse-dir /user/cloudera/sqoop_import \
+--as-avrodatafile
+
+sqoop import-all-tables --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--hive-import --hive-overwrite --create-hive-table \
+--compress --compression-codec org.apache.hadoop.io.compress.SnappyCodec \
+--outdir java_files
+
+# Import all tables using sqoop-import into existing hive database (retail_db)
+sqoop import-all-tables --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--hive-import --hive-overwrite --create-hive-table --hive-database retail_db \
+--compress --compression-codec org.apache.hadoop.io.compress.SnappyCodec \
+--outdir java_files
+
+# Import single table departments using sqoop-import into HDFS location /user/cloudera/department
+sqoop import --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--table departments \
+--as-textfile \
+--target-dir /user/cloudera/sqoop_import/departments
+
+--as-parquetfile
+--as-textfile
+--as-avrodatafile
+--as-sequencefile
+# boundary-query(both sides inclusive), columns
+sqoop import --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--table products \
+--as-textfile \
+--columns product_id,product_name,product_price \
+--boundary-query 'select 10, 20 from departments limit 1' \
+--target-dir /user/cloudera/sqoop_import/products
+
+# --split-by can be used to use multiple threads in case there is no primary key or unique key in the table from source database. If --split-by is not used we should pass --num-mappers 1
+# --query, --where(not work in joining clauses)
+sqoop import --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--split-by order_id \
+--target-dir /user/cloudera/sqoop_import/join_orders \
+--query 'select * from orders o join order_items oi on o.order_id = oi.order_item_order_id where $CONDITIONS' \
+--outdir javafiles
+
+sqoop import --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--table orders \
+--target-dir /user/cloudera/sqoop_import/orders \
+--where 'order_status = "COMPLETE"' \
+--outdir javafiles
+
+# append
+sqoop import --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--table orders \
+--append \
+--target-dir /user/cloudera/sqoop_import/orders \
+--where 'order_status = "PENDING"' \
+--outdir javafiles
+
+# Import single table into Hive default database
+create table orders (
+order_id int, order_date string, order_customer_id int, order_status string) 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+stored as TEXTFILE;
+
+# The default sqoop delimiters are a comma (,) for fields, a newline (\n) 
+# By default, hive tables are assumed to be of text input format and the delimiters are assumed to be ^A(ctrl-a).
+
+sqoop import --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--table orders \
+--hive-import --hive-overwrite --hive-table orders \
+--outdir javafiles
+
+# Import single table into Hive retail_stage database
+CREATE TABLE departments (
+department_id INT,
+department_name STRING
+)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY '|'
+STORED AS TEXTFILE;
+SHOW TABLES;
+
+sqoop import --connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+-m 4 \
+--table departments \
+--hive-import --hive-overwrite --hive-table departments --hive-database retail_stage \
+--fields-terminated-by '|' \
+--outdir javafiles
+
+# incremental load and merge data
+sqoop import \
+--connect "jdbc:mysql://quickstart.cloudera:3306/retail_db" --username=retail_dba --password=cloudera --table departments \
+--target-dir=/user/cloudera/sqoop_merge/departments
+
+sqoop eval \
+--connect "jdbc:mysql://quickstart.cloudera:3306/retail_db" --username retail_dba --password cloudera \
+--query "update departments set department_name='Testing Merge' where department_id = 9000"
+sqoop eval \
+--connect "jdbc:mysql://quickstart.cloudera:3306/retail_db" --username retail_dba --password cloudera \
+--query "insert into departments values (10000, 'Inserting for merge')"
+
+sqoop import \
+--connect "jdbc:mysql://quickstart.cloudera:3306/retail_db" --username=retail_dba --password=cloudera --table departments \
+--target-dir=/user/cloudera/sqoop_merge/departments_delta \
+--where "department_id >= 9000"
+
+sqoop merge --merge-key department_id \
+--new-data /user/cloudera/sqoop_merge/departments_delta \
+--onto /user/cloudera/sqoop_merge/departments \
+--target-dir /user/cloudera/sqoop_merge/departments_stage \
+--class-name departments \
+--jar-file /tmp/sqoop-cloudera/compile/68784861e1d0f2110027ed3b923cd4e4/departments.jar

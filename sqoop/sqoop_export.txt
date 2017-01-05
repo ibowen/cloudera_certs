@@ -1,0 +1,33 @@
+sqoop import-all-tables \
+--connect 'jdbc:mysql://quickstart.cloudera:3306/retail_db' --username retail_dba --password cloudera \
+--hive-import --create-hive-table --hive-overwrite --hive-database retail_ods \
+--fields-terminated-by '|' --lines-terminated-by '\n' \
+-m 4 --outdir java_files
+
+CREATE TABLE departments_export AS SELECT * FROM retail_db.departments WHERE 1=2;
+
+sqoop export \
+--connect "jdbc:mysql://quickstart.cloudera:3306/retail_db" --username retail_dba --password cloudera \
+--table departments_export \
+--export-dir /user/hive/warehouse/retail_ods.db/departments \
+--input-fields-terminated-by '|' \
+--input-lines-terminated-by '\n' \
+--num-mappers 2 \
+--outdir java_files
+
+# Running sqoop-export in update or upsert mode
+sqoop export \
+--connect "jdbc:mysql://quickstart.cloudera:3306/retail_db" --username retail_dba --password cloudera \
+--table departments_export \
+--export-dir /user/cloudera/sqoop_merge/departments_delta \
+--update-key department_id \
+--update-mode allowinsert \
+--batch \
+--input-fields-terminated-by ',' \
+--input-lines-terminated-by '\n' \
+--num-mappers 2 \
+--outdir java_files
+
+# --input-null-string is used to tell how nulls are stored in alpha-numeric fields in HDFS. If a field in a row in HDFS have string nvl, then null will be inserted in the database table
+# --input-null-non-string is used to tell how nulls are stored in numeric fields in HDFS. If a field in a row in HDFS have numeric value -1, then null will be inserted in the database table
+# --input-fields-terminated-by '\001' is example about non alpha-numeric delimiters for data in HDFS
