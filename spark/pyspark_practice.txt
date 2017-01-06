@@ -1,0 +1,111 @@
+from pyspark import SparkContext, SparkConf
+conf = SparkConf().setAppName("demo1")
+sc = SparkContext(conf=conf)
+
+dataRDD = sc.textFile('/user/cloudera/sqoop_merge/departments')
+for data in dataRDD.collect():
+    print data
+
+# Move data between HDFS and Spark – pyspark
+dataRDD = sc.textFile('/user/cloudera/sqoop_import/departments')
+
+dataRDD.map(lambda rec : tuple(rec.split(',', 1))).saveAsSequenceFile('/user/cloudera/pyspark/departmentsSeq')
+dataRDD.map(lambda rec : tuple(rec.split(',', 1))).saveAsNewAPIHadoopFile('/user/cloudera/pyspark/departmentsNewAPI', "org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat",keyClass="org.apache.hadoop.io.Text",valueClass="org.apache.hadoop.io.Text")
+
+# Reading and writing JSON data
+jsonRDD = sqlContext.jsonFile('/user/cloudera/pyspark/departments.json')
+jsonRDD.registerTempTable('departments')
+sqlContext.sql('select * from departments')
+
+# Word count using pyspark
+wordcountRDD = sc.textFile('/user/cloudera/pyspark/wordcount.txt')
+flatMapRDD = wordcountRDD.flatMap(lambda rec : rec.split(' '))
+mapRDD = flatMapRDD.map(lambda rec : (rec, 1))
+reduceRDD = mapRDD.reduceByKey(lambda accu, value : accu + value)
+
+# Joining disparate data sets using pyspark
+ordersRDD = sc.textFile('/user/cloudera/sqoop_import/orders')
+orderItemsRDD = sc.textFile('/user/cloudera/sqoop_import/order_items')
+ordersPairRDD = ordersRDD.map(lambda rec : tuple(rec.split(',', 1)))
+orderItemsPairRDD = orderItemsRDD.map(lambda rec : (rec.split(',')[1], rec))
+orderJoinItemsRDD = orderItemsPairRDD.join(ordersPairRDD)
+ordersPerDay = orderJoinItemsRDD.map(lambda rec : (rec[1][1].split(',')[0], int(rec[0]))).distinct()
+valuePerDay = orderJoinItemsRDD.map(lambda rec : (rec[1][1].split(',')[0], float(rec[1][0].split(',')[4])))
+totalOrdersPerDay = ordersPerDay.reduceByKey(lambda accu, value : accu + 1)
+totalValuePerDay = valuePerDay.reduceByKey(lambda accu, value : accu + value)
+totalPerDay = totalOrdersPerDay.join(totalValuePerDay)
+
+# Joining data using spark sql
+
+from pyspark.sql import HiveContext, Row
+sqlContext = HiveContext(sc)
+sqlContext.sql("set spark.sql.shuffle.partitions=10");
+ordersMap = ordersRDD.map(lambda rec : Row(order_id=rec.split(',')[0], order_date=rec.split(',')[1], order_customer_id=rec.split(',')[2], order_status=rec.split(',')[3]))
+ordersTable = sqlContext.inferSchema(ordersMap)
+ordersTable.registerTempTable('orders')
+sqlContext.sql('select * from orders limit 5').collect()
+
+rderItemsMap = orderItemsRDD.map(lambda rec : Row(order_item_id = rec.split(',')[0], order_item_order_id = rec.split(',')[1], order_item_product_id = rec.split(',')[2], order_quantity = rec.split(',')[3], order_subtotal = float(rec.split(',')[4]), order_item_product_price = rec.split(',')[5]))
+orderItemsTable = sqlContext.inferSchema(orderItemsMap)
+orderItemsTable.registerTempTable('order_items')
+sqlContext.sql('select * from order_items limit 5').collect()
+
+sqlContext.sql('select o.order_date, count(distinct(o.order_id)) total_orders, round(sum(oi.order_subtotal), 2) total_value from orders o join order_items oi on o.order_id = oi.order_item_order_id group by o.order_date')
+
+# Aggregating data sets using pyspark – totals
+orderItemsRDD.map(lambda rec : float(rec.split(',')[4])).reduce(lambda accu, value : accu + value).collect()
+productsRDD.map(lambda rec : float(rec.split(',')[4]) if rec.split(',')[4] else 0).reduce(lambda accu, value : accu if accu > value else value)
+
+# Computing average – aggregations
+totalRevenue = orderItemsRDD.map(lambda rec : float(rec.split(',')[4])).reduce(lambda accu, value : accu + value)
+totalOrders = orderItemsRDD.map(lambda rec : rec.split(',')[1]).distinct().count()
+totalRevenue / totalOrders
+
+# Aggregations – group by order status
+1. orderByStatus = ordersRDD.map(lambda rec : (rec.split(',')[3], 1)).reduceByKey(lambda accu, value : accu + value)
+2. orderByStatus = ordersRDD.map(lambda rec : (rec.split(',')[3], 1)).countByKey().items()
+3. orderByStatus = ordersRDD.map(lambda rec : (rec.split(',')[3], 1)).groupByKey().map(lambda rec : (rec[0], sum(rec[1])))
+4. orderByStatus = ordersRDD.map(lambda rec : (rec.split(',')[3], 1)).aggregateByKey(0, lambda accu, value : accu + value, lambda accu, value : accu + value)
+5. orderByStatus = ordersRDD.map(lambda rec : (rec.split(',')[3], 1)).combineByKey(lambda rec : 1, lambda accu, value : accu + value, lambda accu, value : accu + value)
+
+# Requirement: Number of orders by order date and order status
+ordersByDateStatus = ordersRDD.map(lambda rec : ((rec.split(',')[1], rec.split(',')[3]), 1)).countByKey().items()
+
+# Generate average revenue per day
+revenueByDayOrderMap = orderJoinItemsRDD.map(lambda rec : ((rec[1][1].split(',')[0], rec[0]), float(rec[1][0].split(',')[4])))
+revenueByDayOrder = revenueByDayOrderMap.reduceByKey(lambda accu, value : accu + value)
+revenueByDayMap = revenueByDayOrder.map(lambda rec : (rec[0][0], (rec[0][1], rec[1])))
+1. revenueByDay = revenueByDayMap.aggregateByKey((0, 0), lambda accu, value : (accu[0] + 1, accu[1] + value[1]), lambda accu, value : (accu[0] + value[0], accu[1] + value[1]))
+2. revenueByDay = revenueByDayMap.combineByKey(lambda value : (1, value[1]), lambda accu, value : (accu[0] + 1, accu[1] + value[1]), lambda accu, value : (accu[0] + value[0], accu[1] + value[1]))
+avgRevenueByDay = revenueByDay.map(lambda rec : (rec[0], rec[1][1]/ rec[1][0]))
+
+# Get customer_id with max revenue for each day
+revenueByDayCustomerMap = orderJoinItemsRDD.map(lambda rec : ((rec[1][1].split(',')[0], rec[1][1].split(',')[1]), float(rec[1][0].split(',')[4])))
+revenueByDayCustomer = revenueByDayCustomerMap.reduceByKey(lambda accu, value : accu + value)
+revenueByDayMap = revenueByDayCustomer.map(lambda rec : (rec[0][0], (rec[0][1], rec[1])))
+
+# Filtering data using pyspark
+ordersRDD.filter(lambda rec : rec.split(',')[3] == "COMPLETE")
+ordersRDD.filter(lambda rec : "PENDING" in rec.split(',')[3])
+ordersRDD.filter(lambda rec : int(rec.split(',')[0]) < 100)
+ordersRDD.filter(lambda rec : int(rec.split(',')[0]) > 10000 or "PENDING" in rec.split(',')[3])
+
+# Sorting and Ranking using pyspark – global
+1. ordersRDD.map(lambda rec : (int(rec.split(',')[0]), rec)).sortByKey(False).take(5)
+2. ordersRDD.map(lambda rec : (int(rec.split(',')[0]), rec)).top(5)
+3. ordersRDD.takeOrdered(5, lambda rec : -int(rec.split(',')[0]))
+
+# Sort products by price with in each category
+productsRDD = sc.textFile('/user/cloudera/sqoop_import/products')
+productsByCategoryMap = productsRDD.map(lambda rec : (rec.split(',')[1], (rec.split(',')[0], rec.split(',')[2], rec.split(',')[4])))
+productsByCategory = productsByCategoryMap.groupByKey()
+productsSortedByCategory = productsByCategory.map(lambda rec : (rec[0], sorted(rec[1], key=lambda k : -float(k[2])))) 
+
+# Get top 3 priced products in each category
+1. top3ProductsByCategory = productsSortedByCategory.map(lambda rec : (rec[0], rec[1][:3]))
+2.
+productsMap = productsRDD.filter(lambda rec : rec.split(',')[4] != "").map(lambda rec : Row(product_id=int(rec.split(',')[0]), product_category_id=int(rec.split(',')[1]), product_name=rec.split(',')[2], product_price=float(rec.split(',')[4])))
+productsTable = sqlContext.inferSchema(productsMap)
+productsTable.registerTempTable('products')
+sqlContext.sql('select * from (select product_category_id, product_id, product_price, dense_rank() over (partition by product_category_id order by product_price desc) dr from products order by product_category_id desc) tmp where dr <=3')
+
