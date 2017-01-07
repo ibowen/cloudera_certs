@@ -1,0 +1,94 @@
+import org.apache.spark.SparkContext
+
+val dataRDD = sc.textFile('/user/cloudera/sqoop_import/departments')
+dataRDD.collect().foreach(println)
+dataRDD.count()
+dataRDD.saveAsTextFile('/user/cloudera/scalaspark/departments')
+
+import org.apache.hadoop.io._
+dataRDD.map(x => (NullWritable.get(), x)).saveAsTextFile("/user/cloudera/scalaspark/departmentsSeq")
+
+dataRDD.map(x => (x.split(',')(0), x.split(',')(1))).saveAsTextFile("/user/cloudera/scalaspark/departmentsSeq")
+
+dataRDD.map(x => (new Text(x.split(',')(0)), new Text(x.split(',')(1)))).saveAsNewAPIHadoopFile("/user/cloudera/scalaspark/departmentsSeq", classOf[Text], classOf[Text], classOf[SequenceFileOutputFormat[Text, Text]])
+
+# word count
+val wordcountFlatMap = wordcountRDD.flatMap(rec => rec.split(' '))
+val wordcountMap = wordcountFlatMap.map(rec => (rec, 1))
+val wordcountFilterMap = wordcountMap.filter(rec => rec._1 != "")
+val wordcountReduceByKey = wordcountFilterMap.reduceByKey((accu, value) => accu + value)
+
+# get the revenue and number of orders from order_items on daily basis
+val orders = sc.textFile("/user/cloudera/sqoop_import/orders")
+val orderItems = sc.textFile("/user/cloudera/sqoop_import/order_items")
+val ordersMap = orders.map(rec => (rec.split(',')(0), rec.split(',')(1)))
+val orderItemsMap = orderItems.map(rec => (rec.split(',')(1), rec.split(',')(4)))
+vas ordersJoinOrderItems = ordersMap.join(orderItemsMap)
+val subtotalByDateByOrderMap = ordersJoinOrderItems.map(rec => ((rec._2._1, rec._1), rec._2._2.toFloat))
+val totalByDateByOrder = subtotalByDateByOrderMap.reduceByKey((accu, value) => (accu + value))
+val totalByDateMap = totalByDateByOrder.map(rec => (rec._1._1, (rec._1._2, rec._2)))
+1.
+val totalByDate = totalByDateMap.aggregateByKey((0,0.0))((accu, value) => (accu._1 + 1, accu._2 + value._2), (accu, value) => (accu._1 + value._1, accu._2 + value._2))
+2.
+val totalByDate = totalByDateMap.combineByKey(value => (1, value._2), (accu: (Int, Float), value: (String, Float)) => (accu._1 + 1, accu._2 + value._2), (accu: (Int, Float), value: (Int, Float)) => (accu._1 + value._1, accu._2 + value._2))
+
+totalByDate.sortByKey().collect().foreach(println)
+
+# Number of orders by status using different by key operations
+val ordersMap = orders.map(rec => (rec.split(',')(3), 1))
+1.
+val ordersByStatus = ordersMap.countByKey()
+ordersByStatus.foreach(println)
+2.
+val ordersByStatus = ordersMap.groupByKey().map(rec => (rec._1, sum(rec._2)))
+ordersByStatus.collect().foreach(println)
+3.
+val ordersByStatus = ordersMap.reduceByKey((accu, value) => accu + value)
+4.
+val ordersByStatus = ordersMap.aggregateByKey(0)((accu, value) => accu + value, (accu, value) => accu + value)
+5.
+val ordersByStatus = ordersMap.combineByKey(value => 1, (accu: Int, value: Int) => accu + value, (accu: Int, value: Int) => accu + value)
+
+# Number of orders by order date and order status
+val ordersByDateByStatus = orders.map(rec => ((rec.split(',')(1), rec.split(',')(3)), 1))
+ordersByDateByStatus.reduceByKey((accu, value) => accu + value).collect().foreach(println)
+
+# Generate average revenue per day
+val avgByDate = totalByDate.map(rec => (rec._1, rec._2._2 / rec._2._1))
+avgByDate.sortByKey().collect().foreach(println)
+
+# Filtering data using scala
+orders.filter(rec => rec.split(',')(3).equals("COMPLETE")).collect().foreach(println)
+orders.filter(rec => rec.split(',')(3).contains("PENDING")).collect().foreach(println)
+orders.filter(rec => rec.split(',')(0).toInt < 100 || rec.split(',')(3).contains("PENDING")).collect().foreach(println)
+
+# Sorting and Ranking using scala – global
+orders.map(rec => (rec.split(',')(0).toInt, rec)).sortByKey(false).take(5).foreach(println)
+orders.map(rec => (rec.split(',')(0).toInt, rec)).take(5).foreach(println)
+orders.map(rec => (rec.split(',')(0).toInt, rec)).takeOrdered(5)(Ordering[Int].reverse.on(x => x._1)).foreach(println)
+
+# Sort products by price with in each category
+val products = sc.textFile("/user/cloudera/sqoop_import/products").filter(rec => !rec.split(',')(0).equals("685"))
+val productsByCategory = products.map(rec => (rec.split(',')(1), rec)).groupByKey()
+productsByCategory.map(rec => rec._2.toList.sortBy(k => -k.split(',')(4).toFloat)).take(100).foreach(println)
+productsByCategory.flatMap(rec => rec._2.toList.sortBy(k => -k.split(',')(4).toFloat)).take(100).foreach(println)
+
+# Get top 3 priced products in each category
+def getTopDenseN(rec: (String, Iterable[String]), topN: Int): Iterable[String] = {
+	var prodPrices: List[Float] = List()
+  	var topNPrices: List[Float] = List()
+  	var sortedRecs: List[String] = List()
+  	for(i <- rec._2) {
+    		prodPrices = prodPrices:+ i.split(",")(4).toFloat
+  	}
+  	topNPrices = prodPrices.distinct.sortBy(k => -k).take(topN)
+  	sortedRecs = rec._2.toList.sortBy(k => -k.split(",")(4).toFloat) 
+  	var x: List[String] = List()
+  	for(i <- sortedRecs) {
+    	if(topNPrices.contains(i.split(",")(4).toFloat))
+      		x = x:+ i 
+ 	 }
+  	return x
+}
+
+productsByCategory.flatMap(rec => getTopDenseN((rec._1, rec._2), 3)).collect().foreach(println)
